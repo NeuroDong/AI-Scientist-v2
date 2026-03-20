@@ -25,6 +25,7 @@ from ai_scientist.perform_icbinb_writeup import (
 )
 from ai_scientist.perform_llm_review import perform_review, load_paper
 from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
+from ai_scientist.vlm import create_client as create_vlm_client
 from ai_scientist.utils.token_tracker import token_tracker
 
 
@@ -85,19 +86,19 @@ def parse_arguments():
     parser.add_argument(
         "--model_agg_plots",
         type=str,
-        default="o3-mini-2025-01-31",
+        default="deepseek-v3.2",
         help="Model to use for plot aggregation",
     )
     parser.add_argument(
         "--model_writeup",
         type=str,
-        default="o1-preview-2024-09-12",
+        default="deepseek-v3.2",
         help="Model to use for writeup",
     )
     parser.add_argument(
         "--model_citation",
         type=str,
-        default="gpt-4o-2024-11-20",
+        default="deepseek-v3.2",
         help="Model to use for citation gathering",
     )
     parser.add_argument(
@@ -109,14 +110,20 @@ def parse_arguments():
     parser.add_argument(
         "--model_writeup_small",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default="deepseek-v3.2",
         help="Smaller model to use for writeup",
     )
     parser.add_argument(
         "--model_review",
         type=str,
-        default="gpt-4o-2024-11-20",
+        default="deepseek-v3.2",
         help="Model to use for review main text and captions",
+    )
+    parser.add_argument(
+        "--model_vlm",
+        type=str,
+        default="ollama/qwen3-vl:32b",
+        help="Model to use for all VLM image understanding tasks",
     )
     parser.add_argument(
         "--skip_writeup",
@@ -282,6 +289,7 @@ if __name__ == "__main__":
                     base_folder=idea_dir,
                     small_model=args.model_writeup_small,
                     big_model=args.model_writeup,
+                    vlm_model=args.model_vlm,
                     page_limit=8,
                     citations_text=citations_text,
                 )
@@ -290,6 +298,7 @@ if __name__ == "__main__":
                     base_folder=idea_dir,
                     small_model=args.model_writeup_small,
                     big_model=args.model_writeup,
+                    vlm_model=args.model_vlm,
                     page_limit=4,
                     citations_text=citations_text,
                 )
@@ -309,8 +318,9 @@ if __name__ == "__main__":
             paper_content = load_paper(pdf_path)
             client, client_model = create_client(args.model_review)
             review_text = perform_review(paper_content, client_model, client)
+            vlm_client, vlm_model = create_vlm_client(args.model_vlm)
             review_img_cap_ref = perform_imgs_cap_ref_review(
-                client, client_model, pdf_path
+                vlm_client, vlm_model, pdf_path
             )
             with open(osp.join(idea_dir, "review_text.txt"), "w") as f:
                 f.write(json.dumps(review_text, indent=4))

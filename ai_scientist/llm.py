@@ -32,6 +32,7 @@ AVAILABLE_LLMS = [
     "o3-mini-2025-01-31",
     # DeepSeek Models
     "deepseek-coder-v2-0724",
+    "deepseek-v3.2",
     "deepcoder-14b",
     # Llama 3 models
     "llama3.1-405b",
@@ -71,6 +72,16 @@ AVAILABLE_LLMS = [
     "ollama/deepseek-r1:70b",
     "ollama/deepseek-r1:671b",
 ]
+
+
+def _is_deepseek_model(model: str) -> bool:
+    return model in ["deepseek-coder-v2-0724", "deepseek-v3.2"]
+
+
+def _deepseek_api_model(model: str) -> str:
+    if model == "deepseek-v3.2":
+        return "deepseek-chat"
+    return "deepseek-coder"
 
 
 # Get N responses from a single message, used for ensembling.
@@ -133,10 +144,10 @@ def get_batch_responses_from_llm(
         new_msg_history = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
-    elif model == "deepseek-coder-v2-0724":
+    elif _is_deepseek_model(model):
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model="deepseek-coder",
+            model=_deepseek_api_model(model),
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -250,6 +261,18 @@ def make_llm_call(client, model, temperature, system_message, prompt):
             n=1,
             seed=0,
         )
+    elif _is_deepseek_model(model):
+        return client.chat.completions.create(
+            model=_deepseek_api_model(model),
+            messages=[
+                {"role": "system", "content": system_message},
+                *prompt,
+            ],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            n=1,
+            stop=None,
+        )
     
     else:
         raise ValueError(f"Model {model} not supported.")
@@ -346,10 +369,10 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model == "deepseek-coder-v2-0724":
+    elif _is_deepseek_model(model):
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model="deepseek-coder",
+            model=_deepseek_api_model(model),
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -501,7 +524,7 @@ def create_client(model) -> tuple[Any, str]:
     elif "o1" in model or "o3" in model:
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
-    elif model == "deepseek-coder-v2-0724":
+    elif _is_deepseek_model(model):
         print(f"Using OpenAI API with {model}.")
         return (
             openai.OpenAI(

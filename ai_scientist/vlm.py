@@ -27,6 +27,7 @@ AVAILABLE_VLMS = [
 
     # qwen
     "ollama/qwen2.5vl:32b",
+    "ollama/qwen3-vl:32b",
 
     "ollama/z-uo/qwen2.5vl_tools:32b",
 ]

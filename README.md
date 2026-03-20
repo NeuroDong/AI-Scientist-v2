@@ -62,9 +62,13 @@ Installation usually takes no more than one hour.
 
 ### Supported Models and API Keys
 
-#### OpenAI Models
+#### DeepSeek Models
 
-By default, the system uses the `OPENAI_API_KEY` environment variable for OpenAI models.
+By default, this repository is configured to use `deepseek-v3.2` for LLM/code tasks through the DeepSeek OpenAI-compatible API (`DEEPSEEK_API_KEY`).
+
+#### Qwen VLM Models
+
+By default, this repository is configured to use `ollama/qwen3-vl:32b` for VLM tasks (local Ollama endpoint).
 
 #### Gemini Models
 
@@ -86,8 +90,10 @@ Our code can optionally use a Semantic Scholar API Key (`S2_API_KEY`) for higher
 
 Ensure you provide the necessary API keys as environment variables for the models you intend to use. For example:
 ```bash
-export OPENAI_API_KEY="YOUR_OPENAI_KEY_HERE"
+export DEEPSEEK_API_KEY="YOUR_DEEPSEEK_API_KEY_HERE"
 export S2_API_KEY="YOUR_S2_KEY_HERE"
+# Optional for local Qwen3-VL via Ollama:
+# export OLLAMA_API_KEY=""
 # Set AWS credentials if using Bedrock
 # export AWS_ACCESS_KEY_ID="YOUR_AWS_ACCESS_KEY_ID"
 # export AWS_SECRET_ACCESS_KEY="YOUR_AWS_SECRET_KEY"
@@ -105,7 +111,7 @@ Before running the full AI Scientist-v2 experiment pipeline, you first use the `
     ```bash
     python ai_scientist/perform_ideation_temp_free.py \
      --workshop-file "ai_scientist/ideas/my_research_topic.md" \
-     --model gpt-4o-2024-05-13 \
+     --model deepseek-v3.2 \
      --max-num-generations 20 \
      --num-reflections 5
     ```
@@ -145,10 +151,12 @@ python launch_scientist_bfts.py \
  --load_ideas "ai_scientist/ideas/my_research_topic.json" \
  --load_code \
  --add_dataset_ref \
- --model_writeup o1-preview-2024-09-12 \
- --model_citation gpt-4o-2024-11-20 \
- --model_review gpt-4o-2024-11-20 \
- --model_agg_plots o3-mini-2025-01-31 \
+ --model_writeup deepseek-v3.2 \
+ --model_writeup_small deepseek-v3.2 \
+ --model_citation deepseek-v3.2 \
+ --model_review deepseek-v3.2 \
+ --model_agg_plots deepseek-v3.2 \
+ --model_vlm ollama/qwen3-vl:32b \
  --num_cite_rounds 20
 ```
 
