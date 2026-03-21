@@ -19,7 +19,10 @@ from ai_scientist.llm import (
 from ai_scientist.tools.semantic_scholar import search_for_papers
 
 from ai_scientist.perform_vlm_review import generate_vlm_img_review
-from ai_scientist.vlm import create_client as create_vlm_client
+from ai_scientist.vlm import create_client as create_vlm_client, resolve_vlm_model
+import logging
+logger = logging.getLogger(__name__)
+
 
 
 def remove_accents_and_clean(s):
@@ -37,7 +40,7 @@ def remove_accents_and_clean(s):
 
 
 def compile_latex(cwd, pdf_file, timeout=30):
-    print("GENERATING LATEX")
+    logger.info("GENERATING LATEX")
 
     commands = [
         ["pdflatex", "-interaction=nonstopmode", "template.tex"],
@@ -56,27 +59,27 @@ def compile_latex(cwd, pdf_file, timeout=30):
                 text=True,
                 timeout=timeout,
             )
-            print("Standard Output:\n", result.stdout)
-            print("Standard Error:\n", result.stderr)
+            logger.info("Standard Output:\n%s", result.stdout)
+            logger.info("Standard Error:\n%s", result.stderr)
         except subprocess.TimeoutExpired:
-            print(
+            logger.info(
                 f"EXCEPTION in compile_latex: LaTeX timed out after {timeout} seconds."
             )
-            print(traceback.format_exc())
+            logger.info(traceback.format_exc())
         except subprocess.CalledProcessError:
-            print(
+            logger.info(
                 f"EXCEPTION in compile_latex: Error running command {' '.join(command)}"
             )
-            print(traceback.format_exc())
+            logger.info(traceback.format_exc())
 
-    print("FINISHED GENERATING LATEX")
+    logger.info("FINISHED GENERATING LATEX")
 
     try:
         shutil.move(osp.join(cwd, "template.pdf"), pdf_file)
     except FileNotFoundError:
-        print("Failed to rename PDF.")
-        print("EXCEPTION in compile_latex while moving PDF:")
-        print(traceback.format_exc())
+        logger.info("Failed to rename PDF.")
+        logger.info("EXCEPTION in compile_latex while moving PDF:")
+        logger.info(traceback.format_exc())
 
 
 def detect_pages_before_impact(latex_folder, timeout=30):
@@ -252,7 +255,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             print_debug=False,
         )
         if "No more citations needed" in text:
-            print("No more citations needed.")
+            logger.info("No more citations needed.")
             return None, True
 
         json_output = extract_json_between_markers(text)
@@ -260,12 +263,12 @@ This JSON will be automatically parsed, so ensure the format is precise."""
         query = json_output["Query"]
         papers = search_for_papers(query)
     except Exception:
-        print("EXCEPTION in get_citation_addition (initial search):")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in get_citation_addition (initial search):")
+        logger.info(traceback.format_exc())
         return None, False
 
     if papers is None:
-        print("No papers found.")
+        logger.info("No papers found.")
         return None, False
 
     paper_strings = []
@@ -298,7 +301,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             print_debug=False,
         )
         if "Do not add any" in text:
-            print("Do not add any.")
+            logger.info("Do not add any.")
             return None, False
 
         json_output = extract_json_between_markers(text)
@@ -330,8 +333,8 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             return None, False
 
     except Exception:
-        print("EXCEPTION in get_citation_addition (selecting papers):")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in get_citation_addition (selecting papers):")
+        logger.info(traceback.format_exc())
         return None, False
 
     references_format = """% {description}
@@ -458,7 +461,7 @@ def perform_writeup(
     num_cite_rounds=20,
     small_model="deepseek-v3.2",
     big_model="deepseek-v3.2",
-    vlm_model="ollama/qwen3-vl:32b",
+    vlm_model="qwen/qwen3-vl-plus",
     n_writeup_reflections=3,
     page_limit=8,
 ):
@@ -473,6 +476,7 @@ def perform_writeup(
     #     os.remove(pdf_file)
 
     try:
+        vlm_model = resolve_vlm_model(vlm_model)
         # Load idea text
         idea_text = ""
         research_idea_path = osp.join(base_folder, "research_idea.md")
@@ -499,7 +503,7 @@ def perform_writeup(
                     with open(path, "r") as f:
                         loaded_summaries[key] = json.load(f)
                 except json.JSONDecodeError:
-                    print(
+                    logger.info(
                         f"Warning: {fname} is not valid JSON. Using empty data for {key}."
                     )
                     loaded_summaries[key] = {}
@@ -584,8 +588,8 @@ def perform_writeup(
                             with open(writeup_file, "w") as fo:
                                 fo.write(revised)
             except Exception:
-                print("EXCEPTION in perform_writeup (citation round):")
-                print(traceback.format_exc())
+                logger.info("EXCEPTION in perform_writeup (citation round):")
+                logger.info(traceback.format_exc())
                 continue
 
         # Generate VLM-based descriptions but do not overwrite plot_names
@@ -615,8 +619,8 @@ def perform_writeup(
                 plot_descriptions_list.append(f"{fname}: {desc_text}")
             plot_descriptions_str = "\n".join(plot_descriptions_list)
         except Exception:
-            print("EXCEPTION in VLM figure description generation:")
-            print(traceback.format_exc())
+            logger.info("EXCEPTION in VLM figure description generation:")
+            logger.info(traceback.format_exc())
             plot_descriptions_str = "No descriptions available."
 
         # Construct final prompt for big model, placing the figure descriptions alongside the plot list
@@ -668,7 +672,7 @@ def perform_writeup(
             # Compile current version before reflection
             compile_latex(latex_folder, base_pdf_file + f"_{compile_attempt}.pdf")
             compile_attempt += 1
-            print(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
+            logger.info(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
 
             # Detect where "Impact Statement" appears
             impact_loc = detect_pages_before_impact(latex_folder)
@@ -717,7 +721,7 @@ If you believe you are done, simply say: "I am done".
             )
 
             if "I am done" in reflection_response:
-                print(
+                logger.info(
                     "LLM indicated it is done with reflections. Exiting reflection loop."
                 )
                 break
@@ -745,19 +749,19 @@ If you believe you are done, simply say: "I am done".
                         latex_folder, base_pdf_file + f"_{compile_attempt}.pdf"
                     )
                     compile_attempt += 1
-                    print(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
+                    logger.info(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
                 else:
-                    print(f"No changes in reflection step {i+1}.")
+                    logger.info(f"No changes in reflection step {i+1}.")
                     break
             else:
-                print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                logger.info(f"No valid LaTeX code block found in reflection step {i+1}.")
                 break
 
         return osp.exists(base_pdf_file + f"_{compile_attempt-1}.pdf")
 
     except Exception:
-        print("EXCEPTION in perform_writeup:")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in perform_writeup:")
+        logger.info(traceback.format_exc())
         return False
 
 
@@ -783,8 +787,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vlm-model",
         type=str,
-        default="ollama/qwen3-vl:32b",
-        help="Model to use for VLM figure description tasks.",
+        default="qwen/qwen3-vl-plus",
+        help=(
+            "VLM: default DashScope Qwen-VL; 'auto' = same (QWEN_API_KEY). "
+            "Use ollama/<tag> for local VLMs."
+        ),
     )
     parser.add_argument(
         "--writeup-reflections",
@@ -812,7 +819,7 @@ if __name__ == "__main__":
             page_limit=args.page_limit,
         )
         if not success:
-            print("Writeup process did not complete successfully.")
+            logger.info("Writeup process did not complete successfully.")
     except Exception:
-        print("EXCEPTION in main:")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in main:")
+        logger.info(traceback.format_exc())

@@ -27,7 +27,10 @@ from ai_scientist.perform_vlm_review import (
     perform_imgs_cap_ref_review_selection,
     detect_duplicate_figures,
 )
-from ai_scientist.vlm import create_client as create_vlm_client
+from ai_scientist.vlm import create_client as create_vlm_client, resolve_vlm_model
+import logging
+logger = logging.getLogger(__name__)
+
 
 
 def remove_accents_and_clean(s):
@@ -43,7 +46,7 @@ def remove_accents_and_clean(s):
 
 
 def compile_latex(cwd, pdf_file, timeout=30):
-    print("GENERATING LATEX")
+    logger.info("GENERATING LATEX")
 
     commands = [
         ["pdflatex", "-interaction=nonstopmode", "template.tex"],
@@ -62,27 +65,27 @@ def compile_latex(cwd, pdf_file, timeout=30):
                 text=True,
                 timeout=timeout,
             )
-            print("Standard Output:\n", result.stdout)
-            print("Standard Error:\n", result.stderr)
+            logger.info("Standard Output:\n%s", result.stdout)
+            logger.info("Standard Error:\n%s", result.stderr)
         except subprocess.TimeoutExpired:
-            print(
+            logger.info(
                 f"EXCEPTION in compile_latex: LaTeX timed out after {timeout} seconds."
             )
-            print(traceback.format_exc())
+            logger.info(traceback.format_exc())
         except subprocess.CalledProcessError:
-            print(
+            logger.info(
                 f"EXCEPTION in compile_latex: Error running command {' '.join(command)}"
             )
-            print(traceback.format_exc())
+            logger.info(traceback.format_exc())
 
-    print("FINISHED GENERATING LATEX")
+    logger.info("FINISHED GENERATING LATEX")
 
     try:
         shutil.move(osp.join(cwd, "template.pdf"), pdf_file)
     except FileNotFoundError:
-        print("Failed to rename PDF.")
-        print("EXCEPTION in compile_latex while moving PDF:")
-        print(traceback.format_exc())
+        logger.info("Failed to rename PDF.")
+        logger.info("EXCEPTION in compile_latex while moving PDF:")
+        logger.info(traceback.format_exc())
 
 
 def is_header_or_footer(line):
@@ -162,15 +165,15 @@ def detect_references_position_clean(pdf_file):
                 with open(page_txt, "r", encoding="utf-8", errors="ignore") as fp:
                     content = fp.read()
             except Exception as e:
-                print(f"Error reading page {page}: {e}")
-                print(traceback.format_exc())
+                logger.info(f"Error reading page {page}: {e}")
+                logger.info(traceback.format_exc())
                 shutil.rmtree(temp_dir)
                 continue
             finally:
                 shutil.rmtree(temp_dir)
         except Exception as e:
-            print(f"Error running pdftotext for page {page}: {e}")
-            print(traceback.format_exc())
+            logger.info(f"Error running pdftotext for page {page}: {e}")
+            logger.info(traceback.format_exc())
             shutil.rmtree(temp_dir)
             continue
 
@@ -218,15 +221,15 @@ def extract_page_line_counts(pdf_file, first_page, last_page):
                 with open(page_txt, "r", encoding="utf-8", errors="ignore") as fp:
                     content = fp.read()
             except Exception as e:
-                print(f"Error reading page {page}: {e}")
-                print(traceback.format_exc())
+                logger.info(f"Error reading page {page}: {e}")
+                logger.info(traceback.format_exc())
                 shutil.rmtree(temp_dir)
                 continue
             finally:
                 shutil.rmtree(temp_dir)
         except Exception as e:
-            print(f"Error running pdftotext for page {page}: {e}")
-            print(traceback.format_exc())
+            logger.info(f"Error running pdftotext for page {page}: {e}")
+            logger.info(traceback.format_exc())
             shutil.rmtree(temp_dir)
             continue
         # Clean the extracted text and count the number of remaining lines.
@@ -296,8 +299,8 @@ def check_page_limit(pdf_file, page_limit=4, timeout=30):
         return result
 
     except Exception as e:
-        print(f"Error checking page limit: {e}")
-        print(traceback.format_exc())
+        logger.info(f"Error checking page limit: {e}")
+        logger.info(traceback.format_exc())
         return None
 
 
@@ -441,7 +444,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             print_debug=False,
         )
         if "No more citations needed" in text:
-            print("No more citations needed.")
+            logger.info("No more citations needed.")
             return None, True
 
         json_output = extract_json_between_markers(text)
@@ -449,12 +452,12 @@ This JSON will be automatically parsed, so ensure the format is precise."""
         query = json_output["Query"]
         papers = search_for_papers(query, result_limit=5)
     except Exception:
-        print("EXCEPTION in get_citation_addition (initial search):")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in get_citation_addition (initial search):")
+        logger.info(traceback.format_exc())
         return None, False
 
     if papers is None:
-        print("No papers found.")
+        logger.info("No papers found.")
         return None, False
 
     paper_strings = []
@@ -487,7 +490,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             print_debug=False,
         )
         if "Do not add any" in text:
-            print("Do not add any.")
+            logger.info("Do not add any.")
             return None, False
 
         json_output = extract_json_between_markers(text)
@@ -519,8 +522,8 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             return None, False
 
     except Exception:
-        print("EXCEPTION in get_citation_addition (selecting papers):")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in get_citation_addition (selecting papers):")
+        logger.info(traceback.format_exc())
         return None, False
 
     references_format = """% {description}
@@ -679,7 +682,7 @@ def load_exp_summaries(base_folder):
                 with open(path, "r") as f:
                     loaded_summaries[key] = json.load(f)
             except json.JSONDecodeError:
-                print(
+                logger.info(
                     f"Warning: {fname} is not valid JSON. Using empty data for {key}."
                 )
                 loaded_summaries[key] = {}
@@ -771,10 +774,10 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-v3.2
             with open(progress_path, "r") as f:
                 progress = json.load(f)
                 current_round = progress.get("completed_rounds", 0)
-            print(f"Resuming citation gathering from round {current_round}")
+            logger.info(f"Resuming citation gathering from round {current_round}")
         except Exception as e:
-            print(f"Error loading cached citations: {e}")
-            print("Starting fresh")
+            logger.info(f"Error loading cached citations: {e}")
+            logger.info("Starting fresh")
             current_round = 0
             citations_text = ""
 
@@ -837,8 +840,8 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-v3.2
                                 )
 
             except Exception as e:
-                print(f"Error in citation round {round_idx}: {e}")
-                print(traceback.format_exc())
+                logger.info(f"Error in citation round {round_idx}: {e}")
+                logger.info(traceback.format_exc())
                 # Save progress even if there's an error
                 with open(citations_cache_path, "w") as f:
                     f.write(citations_text)
@@ -849,8 +852,8 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-v3.2
         return citations_text if citations_text else None
 
     except Exception:
-        print("EXCEPTION in gather_citations:")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in gather_citations:")
+        logger.info(traceback.format_exc())
         return citations_text if citations_text else None
 
 
@@ -861,7 +864,7 @@ def perform_writeup(
     num_cite_rounds=20,
     small_model="deepseek-v3.2",
     big_model="deepseek-v3.2",
-    vlm_model="ollama/qwen3-vl:32b",
+    vlm_model="qwen/qwen3-vl-plus",
     n_writeup_reflections=3,
     page_limit=4,
 ):
@@ -880,6 +883,7 @@ def perform_writeup(
             os.remove(osp.join(base_folder, old_pdf))
 
     try:
+        vlm_model = resolve_vlm_model(vlm_model)
         idea_text = load_idea_text(base_folder)
         exp_summaries = load_exp_summaries(base_folder)
         filtered_summaries_for_writeup = filter_experiment_summaries(
@@ -926,9 +930,9 @@ def perform_writeup(
                 try:
                     with open(citations_cache_path, "r") as f:
                         citations_text = f.read()
-                    print("Loaded citations from cache")
+                    logger.info("Loaded citations from cache")
                 except Exception as e:
-                    print(f"Error loading cached citations: {e}")
+                    logger.info(f"Error loading cached citations: {e}")
                     citations_text = None
 
             # If still no citations, gather them
@@ -937,7 +941,7 @@ def perform_writeup(
                     base_folder, num_cite_rounds, small_model
                 )
                 if citations_text is None:
-                    print("Warning: Citation gathering failed")
+                    logger.info("Warning: Citation gathering failed")
                     citations_text = ""
 
         # Insert citations into template.tex
@@ -975,8 +979,8 @@ def perform_writeup(
                 plot_descriptions_list.append(f"{fname}: {desc_text}")
             plot_descriptions_str = "\n".join(plot_descriptions_list)
         except Exception:
-            print("EXCEPTION in VLM figure description generation:")
-            print(traceback.format_exc())
+            logger.info("EXCEPTION in VLM figure description generation:")
+            logger.info(traceback.format_exc())
             plot_descriptions_str = "No descriptions available."
 
         big_model_system_message = writeup_system_message_template.format(
@@ -1029,7 +1033,7 @@ def perform_writeup(
                 base_folder, f"{osp.basename(base_folder)}_reflection{i+1}.pdf"
             )
             # Compile current version before reflection
-            print(f"[green]Compiling PDF for reflection {i+1}...[/green]")
+            logger.info(f"[green]Compiling PDF for reflection {i+1}...[/green]")
             compile_latex(latex_folder, reflection_pdf)
 
             review_img_cap_ref = perform_imgs_cap_ref_review(
@@ -1040,7 +1044,7 @@ def perform_writeup(
             analysis_duplicate_figs = detect_duplicate_figures(
                 vlm_client, vlm_model, reflection_pdf
             )
-            print(analysis_duplicate_figs)
+            logger.info(analysis_duplicate_figs)
 
             # Get reflection_page_info
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
@@ -1114,10 +1118,10 @@ Ensure proper citation usage:
 
                     compile_latex(latex_folder, reflection_pdf)
                 else:
-                    print(f"No changes in reflection step {i+1}.")
+                    logger.info(f"No changes in reflection step {i+1}.")
                     break
             else:
-                print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                logger.info(f"No valid LaTeX code block found in reflection step {i+1}.")
                 break
             # Get new reflection_page_info
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
@@ -1155,7 +1159,7 @@ If you believe you are done with reflection, simply say: "I am done"."""
             )
 
             if "I am done" in reflection_response:
-                print(
+                logger.info(
                     "LLM indicated it is done with reflections. Exiting reflection loop."
                 )
                 break
@@ -1181,10 +1185,10 @@ If you believe you are done with reflection, simply say: "I am done"."""
 
                     compile_latex(latex_folder, reflection_pdf)
                 else:
-                    print(f"No changes in reflection step {i+1}.")
+                    logger.info(f"No changes in reflection step {i+1}.")
                     break
             else:
-                print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                logger.info(f"No valid LaTeX code block found in reflection step {i+1}.")
                 break
 
         # Final reflection on page limit
@@ -1208,9 +1212,9 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
             base_folder, f"{osp.basename(base_folder)}_reflection_final_page_limit.pdf"
         )
         # Compile current version before reflection
-        print(f"[green]Compiling PDF for reflection final page limit...[/green]")
+        logger.info(f"[green]Compiling PDF for reflection final page limit...[/green]")
 
-        print(f"reflection step {i+1}")
+        logger.info(f"reflection step {i+1}")
 
         reflection_code_match = re.search(
             r"```latex(.*?)```", reflection_response, re.DOTALL
@@ -1233,13 +1237,13 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
 
                 compile_latex(latex_folder, reflection_pdf)
             else:
-                print(f"No changes in reflection page step.")
+                logger.info(f"No changes in reflection page step.")
 
         return osp.exists(reflection_pdf)
 
     except Exception:
-        print("EXCEPTION in perform_writeup:")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in perform_writeup:")
+        logger.info(traceback.format_exc())
         return False
 
 
@@ -1265,8 +1269,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vlm-model",
         type=str,
-        default="ollama/qwen3-vl:32b",
-        help="Model to use for VLM figure description tasks.",
+        default="qwen/qwen3-vl-plus",
+        help=(
+            "VLM: default DashScope Qwen-VL; 'auto' = same (QWEN_API_KEY). "
+            "Use ollama/<tag> for local VLMs."
+        ),
     )
     parser.add_argument(
         "--writeup-reflections",
@@ -1294,7 +1301,7 @@ if __name__ == "__main__":
             page_limit=args.page_limit,
         )
         if not success:
-            print("Writeup process did not complete successfully.")
+            logger.info("Writeup process did not complete successfully.")
     except Exception:
-        print("EXCEPTION in main:")
-        print(traceback.format_exc())
+        logger.info("EXCEPTION in main:")
+        logger.info(traceback.format_exc())

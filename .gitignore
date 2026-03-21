@@ -1,3 +1,6 @@
+sbatch_run.sh
+ai_scientist/ideas/Ai_Review_idea.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
