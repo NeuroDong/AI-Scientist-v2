@@ -12,6 +12,7 @@ import tempfile
 
 from ai_scientist.llm import (
     get_response_from_llm,
+    get_writeup_response_with_length_continuations,
     extract_json_between_markers,
     create_client,
     AVAILABLE_LLMS,
@@ -28,8 +29,85 @@ from ai_scientist.perform_vlm_review import (
     detect_duplicate_figures,
 )
 from ai_scientist.vlm import create_client as create_vlm_client, resolve_vlm_model
+from ai_scientist.latex_compile import compile_latex
+from ai_scientist.latex_repair import compile_latex_with_incremental_repair
+from ai_scientist.extract_latex_block import extract_latex_fenced_block
+
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _extract_bibliography_name(latex_text: str) -> str:
+    """Extract the first bibliography database name from \\bibliography{...}."""
+    m = re.search(r"\\bibliography\{([^}]*)\}", latex_text)
+    if not m:
+        return "references"
+    names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+    return names[0] if names else "references"
+
+
+def _extract_bib_entries_from_filecontents(latex_text: str, bib_name: str) -> str | None:
+    """Return entries inside \\begin{filecontents[*]}{<bib_name>.bib} ... \\end{filecontents[*]}."""
+    pattern = (
+        rf"\\begin{{filecontents\*?}}{{{re.escape(bib_name)}\.bib}}"
+        rf"(.*?)"
+        rf"\\end{{filecontents\*?}}"
+    )
+    m = re.search(pattern, latex_text, re.DOTALL)
+    return m.group(1) if m else None
+
+
+def _append_bib_entries_to_filecontents(
+    latex_text: str, bib_name: str, bib_entries: str
+) -> str:
+    """Append bib entries inside the matching filecontents/filecontents* block."""
+    pattern = (
+        rf"(\\begin{{filecontents\*?}}{{{re.escape(bib_name)}\.bib}}.*?)"
+        rf"(\\end{{filecontents\*?}})"
+    )
+    updated, count = re.subn(
+        pattern,
+        rf"\1\n{bib_entries}\2",
+        latex_text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if count == 0:
+        raise ValueError(f"No filecontents block found for {bib_name}.bib in template.tex")
+    return updated
+
+
+def _remove_external_bib_file(latex_folder: str, bib_filename: str) -> None:
+    """Enforce single-source bibliography from template.tex filecontents."""
+    external_bib_path = osp.join(latex_folder, bib_filename)
+    if osp.exists(external_bib_path):
+        os.remove(external_bib_path)
+        logger.info(
+            "Removed external bibliography file %s to enforce filecontents-only mode.",
+            external_bib_path,
+        )
+
+
+def _sanitize_bibtex_text(bib_text: str) -> str:
+    """Escape high-risk LaTeX special chars in BibTeX text."""
+    if not bib_text:
+        return bib_text
+    out = bib_text
+    out = re.sub(r"(?<!\\)&", r"\\&", out)
+    out = re.sub(r"(?<!\\)%", r"\\%", out)
+    out = re.sub(r"(?<!\\)#", r"\\#", out)
+    return out
+
+
+def _sanitize_filecontents_bib_blocks(latex_text: str) -> str:
+    """Sanitize bibliography content embedded inside filecontents blocks."""
+    pattern = r"(\\begin\{filecontents\*?\}\{[^}]+\.bib\})(.*?)(\\end\{filecontents\*?\})"
+    return re.sub(
+        pattern,
+        lambda m: f"{m.group(1)}{_sanitize_bibtex_text(m.group(2))}{m.group(3)}",
+        latex_text,
+        flags=re.DOTALL,
+    )
 
 
 
@@ -43,49 +121,6 @@ def remove_accents_and_clean(s):
     # Convert to lowercase
     ascii_str = ascii_str.lower()
     return ascii_str
-
-
-def compile_latex(cwd, pdf_file, timeout=30):
-    logger.info("GENERATING LATEX")
-
-    commands = [
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-        ["bibtex", "template"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-    ]
-
-    for command in commands:
-        try:
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout,
-            )
-            logger.info("Standard Output:\n%s", result.stdout)
-            logger.info("Standard Error:\n%s", result.stderr)
-        except subprocess.TimeoutExpired:
-            logger.info(
-                f"EXCEPTION in compile_latex: LaTeX timed out after {timeout} seconds."
-            )
-            logger.info(traceback.format_exc())
-        except subprocess.CalledProcessError:
-            logger.info(
-                f"EXCEPTION in compile_latex: Error running command {' '.join(command)}"
-            )
-            logger.info(traceback.format_exc())
-
-    logger.info("FINISHED GENERATING LATEX")
-
-    try:
-        shutil.move(osp.join(cwd, "template.pdf"), pdf_file)
-    except FileNotFoundError:
-        logger.info("Failed to rename PDF.")
-        logger.info("EXCEPTION in compile_latex while moving PDF:")
-        logger.info(traceback.format_exc())
 
 
 def is_header_or_footer(line):
@@ -338,14 +373,14 @@ def get_reflection_page_info(reflection_pdf, page_limit):
 
 
 def get_citation_addition(
-    client, model, context, current_round, total_rounds, idea_text
+    client, model, context, current_round, total_rounds, idea_text, bib_filename
 ):
     report, citations = context
     msg_history = []
     citation_system_msg_template = """You are an ambitious AI researcher who is looking to publish a paper to a workshop at ICLR 2025 that explores real-world pitfalls, failures, and challenges in deep learning.
 You have already completed the experiments and now you are looking to collect citations to related papers.
 This phase focuses on collecting references and annotating them to be integrated later.
-Collected citations will be added to a references.bib file.
+Collected citations will be added to a {bib_filename} file.
 
 Reasons to reference papers include:
 1. Summarizing Research: Cite sources when summarizing the existing literature.
@@ -419,7 +454,7 @@ RESPONSE:
 
 In <THOUGHT>, briefly reason over the search results and identify which citation(s) best fit your paper.
 If none are appropriate or would contribute significantly to the write-up, add "Do not add any" to your thoughts.
-Do not select papers that are already in the `references.bib` file, or if the same citation exists under a different name.
+Do not select papers that are already in the `{bib_filename}` file, or if the same citation exists under a different name.
 
 In <JSON>, respond in JSON format with the following fields:
 - "Selected": A list of integer indices for the selected papers, for example [0, 1]. Do not use quotes for the indices, e.g. "['0', '1']" is invalid.
@@ -438,7 +473,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             client=client,
             model=model,
             system_message=citation_system_msg_template.format(
-                total_rounds=total_rounds
+                total_rounds=total_rounds, bib_filename=bib_filename
             ),
             msg_history=msg_history,
             print_debug=False,
@@ -484,7 +519,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
             client=client,
             model=model,
             system_message=citation_system_msg_template.format(
-                total_rounds=total_rounds
+                total_rounds=total_rounds, bib_filename=bib_filename
             ),
             msg_history=msg_history,
             print_debug=False,
@@ -541,7 +576,13 @@ DO NOT USE MORE THAN {page_limit} PAGES FOR THE MAIN TEXT.
 MINIMIZE THE USAGE OF ITEMIZE OR ENUMERATE. ONLY USE THEM IF THEY ARE ABSOLUTELY NECESSARY AND CONTAIN SUBSTANTIAL INFORMATION.
 Ensure that the tables and figures are correctly placed in a reasonable location and format.
 
-- Do not change the overall style which is mandated by the conference. Keep to the current method of including the references.bib file.
+CRITICAL — LaTeX must be syntactically valid and compile with pdflatex:
+- Every \\begin{{...}} must have a matching \\end{{...}} with correct nesting.
+- The **assembled full manuscript** (after any continuation turns for length limits) MUST end with \\end{{document}} inside the ```latex block. Do **not** invent a fake \\end{{document}} early just to “finish” in one reply if content is still missing.
+- If the output hits a length limit mid-file, stop at a **safe** boundary (e.g. end of a paragraph or completed environment); the system will request a continuation — then continue from the next character until the real \\end{{document}}.
+- Escape special characters in text: & % $ # _ {{ }} ~ ^ \\ (use \\% for percent in text, etc.).
+
+- Do not change the overall style which is mandated by the conference. Keep to the current method of including the {bib_filename} file.
 - Do not remove the \\graphicspath directive or no figures will be found.
 - Do not add `Acknowledgements` section to the paper.
 
@@ -595,8 +636,8 @@ Ensure you are always writing good compilable LaTeX code. Common mistakes that s
 - Do not hallucinate new citations or any results not in the logs.
 
 Ensure proper citation usage:
-- Always include references within \begin{{filecontents}}{{references.bib}} ... \end{{filecontents}}, even if they haven't changed from the previous round.
-- Use citations from the provided references.bib content.
+- Always include references within \begin{{filecontents}}{{{bib_filename}}} ... \end{{filecontents}}, even if they haven't changed from the previous round.
+- Use citations from the provided {bib_filename} content.
 - Each section (especially Related Work) should have multiple citations.
 
 When returning final code, place it in fenced triple backticks with 'latex' syntax highlighting.
@@ -637,7 +678,8 @@ Your current progress on the LaTeX write-up is:
 Produce the final version of the LaTeX manuscript now, ensuring the paper is coherent, concise, and reports results accurately.
 Return the entire file in full, with no unfilled placeholders!
 This must be an acceptable complete LaTeX writeup, suitable for a 4-page single-column workshop paper.
-Make sure to use the citations from the references.bib file.
+Prioritize syntactically correct LaTeX (balanced environments, \\end{{document}} present) so it can compile without manual fixes.
+Make sure to use the citations from the {bib_filename} file.
 
 Please provide the updated LaTeX code for 'template.tex', wrapped in triple backticks
 with "latex" syntax highlighting, like so:
@@ -763,6 +805,17 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-v3.2
     citations_cache_path = osp.join(base_folder, "cached_citations.bib")
     progress_path = osp.join(base_folder, "citations_progress.json")
 
+    # Use the bibliography DB configured by template.tex if available.
+    bib_filename = "references.bib"
+    template_path = osp.join(base_folder, "latex", "template.tex")
+    if osp.exists(template_path):
+        try:
+            with open(template_path, "r") as tf:
+                bib_name = _extract_bibliography_name(tf.read())
+            bib_filename = f"{bib_name}.bib"
+        except Exception:
+            logger.info("Could not parse bibliography file from template.tex, defaulting to references.bib")
+
     # Initialize or load progress
     current_round = 0
     citations_text = ""
@@ -803,6 +856,7 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-v3.2
                     round_idx,
                     num_cite_rounds,
                     idea_text,
+                    bib_filename,
                 )
 
                 if done:
@@ -817,6 +871,7 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-v3.2
                     break
 
                 if addition is not None:
+                    addition = _sanitize_bibtex_text(addition)
                     # Simple check to avoid duplicating the same title
                     title_match = re.search(r" title = {(.*?)}", addition)
                     if title_match:
@@ -901,6 +956,9 @@ def perform_writeup(
         writeup_file = osp.join(latex_folder, "template.tex")
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
+        bib_name = _extract_bibliography_name(writeup_text)
+        bib_filename = f"{bib_name}.bib"
+        _remove_external_bib_file(latex_folder, bib_filename)
 
         # Gather plot filenames from figures/ folder
         figures_dir = osp.join(base_folder, "figures")
@@ -920,8 +978,7 @@ def perform_writeup(
             aggregator_code = "No aggregator script found."
 
         if no_writing:
-            compile_latex(latex_folder, pdf_file)
-            return osp.exists(pdf_file)
+            return compile_latex(latex_folder, pdf_file)
 
         # If no citations provided, try to load from cache first
         if citations_text is None:
@@ -946,12 +1003,15 @@ def perform_writeup(
 
         # Insert citations into template.tex
         if citations_text:
+            citations_text = _sanitize_bibtex_text(citations_text)
             with open(writeup_file, "r") as f:
                 content = f.read()
-            pattern_end = r"\end{filecontents}"
-            content = content.replace(pattern_end, f"\n{citations_text}{pattern_end}")
+            bib_name = _extract_bibliography_name(content)
+            bib_filename = f"{bib_name}.bib"
+            content = _append_bib_entries_to_filecontents(content, bib_name, citations_text)
             with open(writeup_file, "w") as f:
                 f.write(content)
+            _remove_external_bib_file(latex_folder, bib_filename)
 
         # Generate VLM-based descriptions
         try:
@@ -983,12 +1043,27 @@ def perform_writeup(
             logger.info(traceback.format_exc())
             plot_descriptions_str = "No descriptions available."
 
-        big_model_system_message = writeup_system_message_template.format(
-            page_limit=page_limit
-        )
-        big_client, big_client_model = create_client(big_model)
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
+        writeup_text = _sanitize_filecontents_bib_blocks(writeup_text)
+        with open(writeup_file, "w") as f:
+            f.write(writeup_text)
+        bib_name = _extract_bibliography_name(writeup_text)
+        bib_filename = f"{bib_name}.bib"
+        _remove_external_bib_file(latex_folder, bib_filename)
+        big_model_system_message = writeup_system_message_template.format(
+            page_limit=page_limit, bib_filename=bib_filename
+        )
+        big_client, big_client_model = create_client(big_model)
+
+        def _compile_to_pdf(out_pdf: str) -> bool:
+            return compile_latex_with_incremental_repair(
+                latex_folder,
+                out_pdf,
+                writeup_file,
+                big_client,
+                big_client_model,
+            )
 
         combined_prompt = writeup_prompt.format(
             idea_text=idea_text,
@@ -997,9 +1072,10 @@ def perform_writeup(
             plot_list=", ".join(plot_names),
             latex_writeup=writeup_text,
             plot_descriptions=plot_descriptions_str,
+            bib_filename=bib_filename,
         )
 
-        response, msg_history = get_response_from_llm(
+        response, msg_history = get_writeup_response_with_length_continuations(
             prompt=combined_prompt,
             client=big_client,
             model=big_client_model,
@@ -1007,10 +1083,18 @@ def perform_writeup(
             print_debug=False,
         )
 
-        latex_code_match = re.search(r"```latex(.*?)```", response, re.DOTALL)
-        if not latex_code_match:
+        updated_latex_code = extract_latex_fenced_block(response)
+        if not updated_latex_code:
+            preview = (response or "").strip().replace("\n", " ")[:900]
+            logger.warning(
+                "ICBINB writeup: could not extract LaTeX from model response (need "
+                "```latex ... ``` or ```latex with no closing fence). "
+                "Response preview: %s%s",
+                preview,
+                "…" if len(response or "") > 900 else "",
+            )
             return False
-        updated_latex_code = latex_code_match.group(1).strip()
+        updated_latex_code = _sanitize_filecontents_bib_blocks(updated_latex_code)
         with open(writeup_file, "w") as f:
             f.write(updated_latex_code)
 
@@ -1018,6 +1102,9 @@ def perform_writeup(
         for i in range(n_writeup_reflections):
             with open(writeup_file, "r") as f:
                 current_latex = f.read()
+            current_bib_name = _extract_bibliography_name(current_latex)
+            current_bib_filename = f"{current_bib_name}.bib"
+            _remove_external_bib_file(latex_folder, current_bib_filename)
 
             # Check for unused or invalid figure references
             referenced_figs_temp = re.findall(
@@ -1034,7 +1121,7 @@ def perform_writeup(
             )
             # Compile current version before reflection
             logger.info(f"[green]Compiling PDF for reflection {i+1}...[/green]")
-            compile_latex(latex_folder, reflection_pdf)
+            _compile_to_pdf(reflection_pdf)
 
             review_img_cap_ref = perform_imgs_cap_ref_review(
                 vlm_client, vlm_model, reflection_pdf
@@ -1081,13 +1168,14 @@ VLM reviews:
 Please provide a revised complete LaTeX in triple backticks, or repeat the same if no changes are needed.
 Return the entire file in full, with no unfilled placeholders!
 This must be an acceptable complete LaTeX writeup.
+Keep LaTeX syntactically valid: balanced \\begin/\\end and a final \\end{{document}}.
 Do not hallucinate any details!
 Ensure proper citation usage:
-- Always include references within \begin{{filecontents}}{{references.bib}} ... \end{{filecontents}}, even if they haven't changed from the previous round.
-- Use citations from the provided references.bib content.
+- Always include references within \begin{{filecontents}}{{{bib_filename}}} ... \end{{filecontents}}, even if they haven't changed from the previous round.
+- Use citations from the provided {bib_filename} content.
 """
 
-            reflection_response, msg_history = get_response_from_llm(
+            reflection_response, msg_history = get_writeup_response_with_length_continuations(
                 prompt=reflection_prompt,
                 client=big_client,
                 model=big_client_model,
@@ -1097,11 +1185,8 @@ Ensure proper citation usage:
             )
 
             # 2nd run:
-            reflection_code_match = re.search(
-                r"```latex(.*?)```", reflection_response, re.DOTALL
-            )
-            if reflection_code_match:
-                reflected_latex_code = reflection_code_match.group(1).strip()
+            reflected_latex_code = extract_latex_fenced_block(reflection_response)
+            if reflected_latex_code:
                 if reflected_latex_code != current_latex:
                     final_text = reflected_latex_code
                     cleanup_map = {
@@ -1116,7 +1201,7 @@ Ensure proper citation usage:
                     with open(writeup_file, "w") as fo:
                         fo.write(final_text)
 
-                    compile_latex(latex_folder, reflection_pdf)
+                    _compile_to_pdf(reflection_pdf)
                 else:
                     logger.info(f"No changes in reflection step {i+1}.")
                     break
@@ -1149,7 +1234,7 @@ Please ensure all changes maintain scientific rigor and improve the paper's clar
 Be more aggressive with figure selection - move more figures to the appendix or group them together with other figures if the page limit is already exceeded.
 
 If you believe you are done with reflection, simply say: "I am done"."""
-            reflection_response, msg_history = get_response_from_llm(
+            reflection_response, msg_history = get_writeup_response_with_length_continuations(
                 prompt=img_reflection_prompt,
                 client=big_client,
                 model=big_client_model,
@@ -1164,11 +1249,8 @@ If you believe you are done with reflection, simply say: "I am done"."""
                 )
                 break
 
-            reflection_code_match = re.search(
-                r"```latex(.*?)```", reflection_response, re.DOTALL
-            )
-            if reflection_code_match:
-                reflected_latex_code = reflection_code_match.group(1).strip()
+            reflected_latex_code = extract_latex_fenced_block(reflection_response)
+            if reflected_latex_code:
                 if reflected_latex_code != current_latex:
                     final_text = reflected_latex_code
                     cleanup_map = {
@@ -1183,7 +1265,7 @@ If you believe you are done with reflection, simply say: "I am done"."""
                     with open(writeup_file, "w") as fo:
                         fo.write(final_text)
 
-                    compile_latex(latex_folder, reflection_pdf)
+                    _compile_to_pdf(reflection_pdf)
                 else:
                     logger.info(f"No changes in reflection step {i+1}.")
                     break
@@ -1197,9 +1279,11 @@ If you believe you are done with reflection, simply say: "I am done"."""
         # Get new reflection_page_info
         reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
 
-        final_reflection_prompt = """{reflection_page_info}
+        last_reflection_pdf = reflection_pdf
+
+        final_reflection_prompt = f"""{reflection_page_info}
 USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
-        reflection_response, msg_history = get_response_from_llm(
+        reflection_response, msg_history = get_writeup_response_with_length_continuations(
             prompt=final_reflection_prompt,
             client=big_client,
             model=big_client_model,
@@ -1216,11 +1300,8 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
 
         logger.info(f"reflection step {i+1}")
 
-        reflection_code_match = re.search(
-            r"```latex(.*?)```", reflection_response, re.DOTALL
-        )
-        if reflection_code_match:
-            reflected_latex_code = reflection_code_match.group(1).strip()
+        reflected_latex_code = extract_latex_fenced_block(reflection_response)
+        if reflected_latex_code:
             if reflected_latex_code != current_latex:
                 final_text = reflected_latex_code
                 cleanup_map = {
@@ -1235,15 +1316,32 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
                 with open(writeup_file, "w") as fo:
                     fo.write(final_text)
 
-                compile_latex(latex_folder, reflection_pdf)
+                _compile_to_pdf(reflection_pdf)
             else:
                 logger.info(f"No changes in reflection page step.")
+        else:
+            logger.warning(
+                "ICBINB writeup: final page-limit step could not extract LaTeX from the model response."
+            )
 
-        return osp.exists(reflection_pdf)
+        if osp.exists(reflection_pdf):
+            return True
+        if osp.exists(last_reflection_pdf):
+            logger.warning(
+                "ICBINB writeup: final page-limit PDF not created; treating last reflection PDF as success: %s",
+                last_reflection_pdf,
+            )
+            return True
+        logger.warning(
+            "ICBINB writeup failed: no PDF at %s or %s (see LaTeX messages above).",
+            reflection_pdf,
+            last_reflection_pdf,
+        )
+        return False
 
     except Exception:
-        logger.info("EXCEPTION in perform_writeup:")
-        logger.info(traceback.format_exc())
+        logger.warning("EXCEPTION in perform_writeup (ICBINB):")
+        logger.warning("%s", traceback.format_exc())
         return False
 
 
@@ -1301,7 +1399,7 @@ if __name__ == "__main__":
             page_limit=args.page_limit,
         )
         if not success:
-            logger.info("Writeup process did not complete successfully.")
+            logger.warning("Writeup process did not complete successfully.")
     except Exception:
-        logger.info("EXCEPTION in main:")
-        logger.info(traceback.format_exc())
+        logger.warning("EXCEPTION in main:")
+        logger.warning("%s", traceback.format_exc())

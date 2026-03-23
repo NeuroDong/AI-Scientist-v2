@@ -95,5 +95,5 @@ def flatten_review_text(example: dict) -> str:
     return "\n\n".join(chunks)
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     load_peer_read()

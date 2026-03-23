@@ -11,7 +11,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-MAX_NUM_TOKENS = 4096
+MAX_NUM_TOKENS = 16384 
 
 AVAILABLE_LLMS = [
     "claude-3-5-sonnet-20240620",
@@ -87,6 +87,14 @@ def _deepseek_api_model(model: str) -> str:
     return "deepseek-coder"
 
 
+# DeepSeek Chat (OpenAI-compatible) rejects max_tokens outside [1, 8192] with HTTP 400.
+DEEPSEEK_API_MAX_COMPLETION_TOKENS = 8192
+
+
+def _clamp_deepseek_max_tokens(requested: int) -> int:
+    return min(max(int(requested), 1), DEEPSEEK_API_MAX_COMPLETION_TOKENS)
+
+
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(
     backoff.expo,
@@ -149,6 +157,7 @@ def get_batch_responses_from_llm(
         ]
     elif _is_deepseek_model(model):
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        dmt = _clamp_deepseek_max_tokens(MAX_NUM_TOKENS)
         response = client.chat.completions.create(
             model=_deepseek_api_model(model),
             messages=[
@@ -156,7 +165,7 @@ def get_batch_responses_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=dmt,
             n=n_responses,
             stop=None,
         )
@@ -227,7 +236,10 @@ def get_batch_responses_from_llm(
 
 
 @track_token_usage
-def make_llm_call(client, model, temperature, system_message, prompt):
+def make_llm_call(
+    client, model, temperature, system_message, prompt, max_tokens: int | None = None
+):
+    mt = max_tokens if max_tokens is not None else MAX_NUM_TOKENS
     if model.startswith("ollama/"):
         return client.chat.completions.create(
             model=model.replace("ollama/", ""),
@@ -236,7 +248,7 @@ def make_llm_call(client, model, temperature, system_message, prompt):
                 *prompt,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=mt,
             n=1,
             stop=None,
         )
@@ -248,7 +260,7 @@ def make_llm_call(client, model, temperature, system_message, prompt):
                 *prompt,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=mt,
             n=1,
             stop=None,
             seed=0,
@@ -265,6 +277,13 @@ def make_llm_call(client, model, temperature, system_message, prompt):
             seed=0,
         )
     elif _is_deepseek_model(model):
+        dmt = _clamp_deepseek_max_tokens(mt)
+        if dmt < mt:
+            logger.debug(
+                "Clamping max_tokens %s to DeepSeek API max %s",
+                mt,
+                DEEPSEEK_API_MAX_COMPLETION_TOKENS,
+            )
         return client.chat.completions.create(
             model=_deepseek_api_model(model),
             messages=[
@@ -272,11 +291,11 @@ def make_llm_call(client, model, temperature, system_message, prompt):
                 *prompt,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=dmt,
             n=1,
             stop=None,
         )
-    
+
     else:
         raise ValueError(f"Model {model} not supported.")
 
@@ -298,10 +317,13 @@ def get_response_from_llm(
     print_debug=False,
     msg_history=None,
     temperature=0.7,
+    max_tokens: int | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     msg = prompt
     if msg_history is None:
         msg_history = []
+
+    mt = max_tokens if max_tokens is not None else MAX_NUM_TOKENS
 
     if "claude" in model:
         new_msg_history = msg_history + [
@@ -317,7 +339,7 @@ def get_response_from_llm(
         ]
         response = client.messages.create(
             model=model,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=mt,
             temperature=temperature,
             system=system_message,
             messages=new_msg_history,
@@ -344,7 +366,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=mt,
             n=1,
             stop=None,
         )
@@ -358,6 +380,7 @@ def get_response_from_llm(
             temperature,
             system_message=system_message,
             prompt=new_msg_history,
+            max_tokens=mt,
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
@@ -374,6 +397,13 @@ def get_response_from_llm(
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif _is_deepseek_model(model):
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        dmt = _clamp_deepseek_max_tokens(mt)
+        if dmt < mt:
+            logger.debug(
+                "Clamping max_tokens %s to DeepSeek API max %s",
+                mt,
+                DEEPSEEK_API_MAX_COMPLETION_TOKENS,
+            )
         response = client.chat.completions.create(
             model=_deepseek_api_model(model),
             messages=[
@@ -381,7 +411,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=dmt,
             n=1,
             stop=None,
         )
@@ -397,7 +427,7 @@ def get_response_from_llm(
                     *new_msg_history,
                 ],
                 temperature=temperature,
-                max_tokens=MAX_NUM_TOKENS,
+                max_tokens=mt,
                 n=1,
                 stop=None,
             )
@@ -416,7 +446,7 @@ def get_response_from_llm(
                 },
                 "parameters": {
                     "temperature": temperature,
-                    "max_new_tokens": MAX_NUM_TOKENS,
+                    "max_new_tokens": mt,
                     "return_full_text": False
                 }
             }
@@ -440,7 +470,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=mt,
             n=1,
             stop=None,
         )
@@ -455,7 +485,7 @@ def get_response_from_llm(
                 *new_msg_history,
             ],
             temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+            max_tokens=mt,
             n=1,
         )
         content = response.choices[0].message.content
@@ -473,6 +503,125 @@ def get_response_from_llm(
         logger.info()
 
     return content, new_msg_history
+
+
+# Used when the model hits max_tokens and returns finish_reason=length (common for long LaTeX).
+WRITEUP_LENGTH_CONTINUATION_MESSAGE = (
+    "Your previous reply was cut off due to output length limits (max_tokens). "
+    "Continue EXACTLY from the next character where you stopped. "
+    "Do not repeat anything you already wrote. "
+    "Stay inside the same ```latex fenced block; do not open a second ```latex block. "
+    "On this or a later continuation, complete the file with \\end{document} and then the closing ```."
+)
+
+
+def _writeup_supports_length_continuations(model: str) -> bool:
+    if "claude" in model or "gemini" in model:
+        return False
+    if "o1" in model or "o3" in model:
+        return False
+    if _is_deepseek_model(model):
+        return True
+    if model.startswith("ollama/"):
+        return True
+    if "gpt" in model:
+        return True
+    return False
+
+
+@backoff.on_exception(
+    backoff.expo,
+    (
+        openai.RateLimitError,
+        openai.APITimeoutError,
+        openai.InternalServerError,
+        anthropic.RateLimitError,
+    ),
+)
+def get_writeup_response_with_length_continuations(
+    prompt,
+    client,
+    model,
+    system_message,
+    print_debug=False,
+    msg_history=None,
+    temperature=0.7,
+    max_tokens: int | None = None,
+    max_continuations: int = 16,
+) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Same return shape as ``get_response_from_llm``. For OpenAI-compatible chat
+    models used with ``make_llm_call`` (DeepSeek, GPT, Ollama), keeps calling
+    the API while ``finish_reason == 'length'`` and concatenates assistant
+    chunks so long LaTeX is not truncated mid-file.
+    """
+    if not _writeup_supports_length_continuations(model):
+        return get_response_from_llm(
+            prompt,
+            client,
+            model,
+            system_message,
+            print_debug=print_debug,
+            msg_history=msg_history,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    msg_history = msg_history or []
+    mt = max_tokens if max_tokens is not None else MAX_NUM_TOKENS
+    chat_tail: list[dict[str, Any]] = msg_history + [{"role": "user", "content": prompt}]
+    chunks: list[str] = []
+
+    for round_idx in range(max_continuations):
+        response = make_llm_call(
+            client=client,
+            model=model,
+            temperature=temperature,
+            system_message=system_message,
+            prompt=chat_tail,
+            max_tokens=mt,
+        )
+        choice = response.choices[0]
+        part = choice.message.content or ""
+        chunks.append(part)
+        fr = getattr(choice, "finish_reason", None)
+        if fr != "length":
+            if round_idx > 0:
+                logger.info(
+                    "Writeup: used %s continuation round(s); final finish_reason=%s",
+                    round_idx,
+                    fr,
+                )
+            break
+        logger.info(
+            "Writeup: finish_reason=length (continuation %s / %s); requesting more output",
+            round_idx + 1,
+            max_continuations,
+        )
+        chat_tail = chat_tail + [
+            {"role": "assistant", "content": part},
+            {"role": "user", "content": WRITEUP_LENGTH_CONTINUATION_MESSAGE},
+        ]
+    else:
+        logger.warning(
+            "Writeup: still hitting length limit after %s continuation rounds; LaTeX may be incomplete",
+            max_continuations,
+        )
+
+    full_text = "".join(chunks)
+    new_msg_history: list[dict[str, Any]] = msg_history + [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": full_text},
+    ]
+
+    if print_debug:
+        logger.info("*" * 20 + " WRITEUP LLM (concat) " + "*" * 20)
+        logger.info(full_text[:8000])
+        if len(full_text) > 8000:
+            logger.info("... [%s more chars]", len(full_text) - 8000)
+        logger.info("*" * 21 + " WRITEUP LLM END " + "*" * 21)
+
+    return full_text, new_msg_history
 
 
 def extract_json_between_markers(llm_output: str) -> dict | None: 

@@ -1,5 +1,9 @@
 sbatch_run.sh
-ai_scientist/ideas/Ai_Review_idea.json
+experiments/
+ai_scientist/ideas/my_research_topic.md
+ai_scientist/ideas/my_research_topic.json
+logs/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
